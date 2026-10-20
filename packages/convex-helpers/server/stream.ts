@@ -252,6 +252,11 @@ export abstract class QueryStream<
   // Values that must match a prefix of the index key.
   abstract getEqualityIndexFilter(): Value[];
 
+  /** @internal A cursor with the same pagination boundary as this index key. */
+  getPaginationKey(indexKey: IndexKey): IndexKey {
+    return indexKey;
+  }
+
   /// Methods for creating new streams as modifications of the current stream.
 
   /**
@@ -269,6 +274,15 @@ export abstract class QueryStream<
    * of documents, the `.paginate()` method will read a lot of documents until
    * it gets as many documents as it wants. If you run into issues with reading
    * too much data, you can pass `maximumRowsRead` to `paginate()`.
+   *
+   * When a read limit stops a page that has returned at least one document,
+   * the page's cursors point at returned documents, never at filtered-out ones,
+   * and the rows scanned after the last returned document are re-scanned by the
+   * next page. A page stopped before returning anything continues from the last
+   * row scanned, so its cursor does name a filtered-out document. Refreshes
+   * with a fixed `endCursor` keep their existing checkpoint: if a read limit
+   * stops one early, its `continueCursor` is the last row scanned, which may be
+   * filtered out.
    */
   filterWith(predicate: (doc: T) => Promise<boolean>): QueryStream<T> {
     const order = this.getOrder();
@@ -334,6 +348,16 @@ export abstract class QueryStream<
    * distinct index fields.
    *
    * This can be used to perform a loose index scan.
+   *
+   * Read limits (`maximumRowsRead` / `maximumBytesRead`) apply to the whole
+   * page, not separately to each group. When a limit stops a page that has
+   * returned at least one item, the page resumes after its last returned item,
+   * so groups examined after it are re-scanned with a fresh budget on the next
+   * page. When a limit stops a page before it returns anything, the page
+   * advances past the last group examined, even if that group still has unread
+   * matching items, so those items are skipped. Refreshes with a fixed
+   * `endCursor` keep their existing checkpoint instead: a limit stops them at
+   * the last row scanned, whether or not it was returned.
    */
   distinct(distinctIndexFields: string[]): QueryStream<T> {
     return new DistinctStream(this, distinctIndexFields);
@@ -403,6 +427,7 @@ export abstract class QueryStream<
     });
     const page: T[] = [];
     const indexKeys: IndexKey[] = [];
+    const resultKeys: IndexKey[] = [];
     let hasMore = opts.endCursor && opts.endCursor !== "[]";
     let continueCursor = opts.endCursor ?? "[]";
     const maxBytesToRead = opts.maximumBytesRead;
@@ -414,6 +439,7 @@ export abstract class QueryStream<
     )) {
       if (doc !== null) {
         page.push(doc);
+        resultKeys.push(indexKey);
       }
       indexKeys.push(indexKey);
       totalBytesRead += bandwidth;
@@ -425,29 +451,47 @@ export abstract class QueryStream<
       }
       if (hitLimit || (maxRows !== undefined && page.length >= maxRows)) {
         hasMore = true;
-        continueCursor = serializeCursor(indexKey);
+        // Retry work after the last result when choosing a new boundary. Keep
+        // existing progress semantics for refreshes with a fixed endCursor.
+        // Empty pages still advance; distinct uses a whole-group boundary.
+        continueCursor = serializeCursor(
+          opts.endCursor
+            ? indexKey
+            : (resultKeys.at(-1) ?? this.getPaginationKey(indexKey)),
+        );
         break;
       }
     }
     let pageStatus: "SplitRecommended" | "SplitRequired" | undefined =
       undefined;
     let splitCursor: IndexKey | undefined = undefined;
+    // Split at a returned item whenever there is one, so a nonempty page's
+    // cursors only ever name documents the caller was allowed to see. Only an
+    // empty page falls back to a position among the scanned (filtered) rows.
+    const splitKeys = resultKeys.length > 0 ? resultKeys : indexKeys;
+    const splitIndex = Math.floor((splitKeys.length - 1) / 2);
     if (hitLimit) {
       pageStatus = "SplitRequired";
-      splitCursor = indexKeys[Math.floor((indexKeys.length - 1) / 2)];
+      splitCursor = splitKeys[splitIndex];
     } else if (
       indexKeys.length >= SOFT_MAX_SCAN_LEN ||
       page.length > opts.numItems + 1
     ) {
       pageStatus = "SplitRecommended";
-      splitCursor = indexKeys[Math.floor((indexKeys.length - 1) / 2)];
+      splitCursor = splitKeys[splitIndex];
     }
     return {
       page,
       isDone: !hasMore,
       continueCursor,
       pageStatus,
-      splitCursor: splitCursor ? serializeCursor(splitCursor) : undefined,
+      splitCursor: splitCursor
+        ? serializeCursor(
+            resultKeys.length > 0
+              ? splitCursor
+              : this.getPaginationKey(splitCursor),
+          )
+        : undefined,
     };
   }
   async collect() {
@@ -1481,6 +1525,13 @@ class FlatMapStream<
   getIndexFields(): string[] {
     return [...this.#stream.getIndexFields(), ...this.#mappedIndexFields];
   }
+  override getPaginationKey(indexKey: IndexKey): IndexKey {
+    // map/filter retain the outer pagination boundary. A real flatMap needs
+    // its full inner position to avoid skipping remaining inner results.
+    return this.#mappedIndexFields.length === 0
+      ? this.#stream.getPaginationKey(indexKey)
+      : indexKey;
+  }
   narrow(indexBounds: IndexBounds) {
     const outerLength = this.#stream.getIndexFields().length;
     const outerLowerBound = indexBounds.lowerBound.slice(0, outerLength);
@@ -1891,6 +1942,9 @@ class DistinctStream<T extends GenericStreamItem> extends QueryStream<T> {
         };
       },
     };
+  }
+  override getPaginationKey(indexKey: IndexKey): IndexKey {
+    return indexKey.slice(0, this.#distinctIndexFieldsLength);
   }
   override narrow(indexBounds: IndexBounds): QueryStream<T> {
     const indexBoundsPrefix: IndexBounds = {
