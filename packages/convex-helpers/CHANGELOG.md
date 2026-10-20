@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- The package's TypeScript sources are now published under `src/` instead of
+  next to the compiled files. Apps no longer typecheck convex-helpers' source
+  files with their own compiler settings, so a newer `convex` that adds a
+  validator kind no longer breaks their build, even with `skipLibCheck`.
+  Go to Definition still opens the original source.
+
 ## 0.1.128
 
 - Triggers: `patch`, `replace` and `delete` with an explicit table name now
