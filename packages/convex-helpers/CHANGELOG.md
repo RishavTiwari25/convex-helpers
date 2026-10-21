@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.129
+
+- (fix:streams) Retry later groups after nonempty pages (#1027)
+- (fix:validators) Only match own keys of an object validator's fields. Thanks to
+  @mikirejf for the fix! (#1035)
+
 ## 0.1.128
 
 - Triggers: `patch`, `replace` and `delete` with an explicit table name now
