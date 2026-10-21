@@ -16,9 +16,6 @@ npm install
 
 The frontend and its Vite config live in `example-ui/`. Run `npm run dev:frontend`
 from the repository root; Vite reads the root `.env.local` for `VITE_CONVEX_URL`.
-To build the frontend, run `npm run build` followed by
-`npx vite build --config example-ui/vite.config.mts`. Frontend hosting should serve
-`example-ui/dist/`.
 
 ## Adding a helper
 
