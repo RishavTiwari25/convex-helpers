@@ -869,7 +869,7 @@ export const list = query({
     // The pagination happens after the filtering, so the page should have size
     // `paginationOpts.numItems`.
     // To avoid reading too much data unexpectedly, you can optionally set maximumRowsRead.
-    return await messagesByVerifiedAuthors.paginate({
+    return await allMessagesStream.paginate({
       ...paginationOpts,
       maximumRowsRead: 100,
     });
@@ -946,21 +946,23 @@ export const latestMessages = query({
   args: { paginationOpts: paginationOptsValidator },
   handler: async (ctx, { paginationOpts }) => {
     // Get the channels the user is a member of
+    const userId = await getAuthedUserId(ctx);
     const channelMemberships = stream(ctx.db, schema)
       .query("channelMemberships")
-      .withIndex("userId", q => q.eq("userId", await getAuthedUserId(ctx)));
+      .withIndex("userId", (q) => q.eq("userId", userId));
     // Map membership to the channel info (including channel name, etc.)
     const channels = channelMemberships.map(async (membership) => {
       return (await ctx.db.get(membership.channelId))!;
     });
     // For each channel, expand it into the messages in that channel,
     // with the channel's fields also included.
-    const messages = channels.flatMap(async (channel) =>
-      stream(ctx.db, stream)
-        .query("messages")
-        .withIndex("channelId", q => q.eq("channelId", channel._id))
-        .map(async (message) => { ...channel, ...message }),
-      ["channelId", "_creationTime"]
+    const messages = channels.flatMap(
+      async (channel) =>
+        stream(ctx.db, schema)
+          .query("messages")
+          .withIndex("channelId", (q) => q.eq("channelId", channel._id))
+          .map(async (message) => ({ ...channel, ...message })),
+      ["channelId", "_creationTime"],
     );
     return await messages.paginate(paginationOpts);
   },
@@ -1035,6 +1037,13 @@ const users = useQuery(api.todos.getAll);
 
 ## TypeScript API Generation
 
+Install the CLI and its optional `prettier` peer dependency together in your project
+so `npx` uses the local CLI, which can resolve that copy of Prettier:
+
+```bash
+npm install --save-dev convex-helpers prettier
+```
+
 Generate Convex API objects to use Convex with type-safety in separate repositories.
 Once in the Convex folder whose functions you want to make an API for, you can run
 
@@ -1050,6 +1059,12 @@ use your Convex functions with type-safety. It includes your internal functions,
 can feel free to remove them.
 
 ## Open API Spec Generation
+
+First, install the CLI and its optional `prettier` peer dependency locally:
+
+```bash
+npm install --save-dev convex-helpers prettier
+```
 
 Generate an Open API spec to create a client in a language that Convex doesn't currently
 support or connect with tools like Retool. Once in the Convex folder whose functions you
@@ -1118,14 +1133,17 @@ triggers.register("users", async (ctx, change) => {
   }
 });
 
-// 3. After the mutation, send the new user info to Clerk.
+// 3. After an insert or update, send the new user info to Clerk.
 // Even if a user is modified multiple times in a single mutation,
 // `internal.users.updateClerkUser` runs once.
 const scheduled: Record<Id<"users">, Id<"_scheduled_functions">> = {};
 triggers.register("users", async (ctx, change) => {
   if (scheduled[change.id]) {
     await ctx.scheduler.cancel(scheduled[change.id]);
+    delete scheduled[change.id];
   }
+  // Cancel any pending update on deletion; Clerk deletions need a separate handler.
+  if (change.operation === "delete") return;
   scheduled[change.id] = await ctx.scheduler.runAfter(
     0,
     internal.users.updateClerkUser,
@@ -1135,6 +1153,7 @@ triggers.register("users", async (ctx, change) => {
 
 // 4. When a user is deleted, delete their messages (cascading deletes).
 triggers.register("users", async (ctx, change) => {
+  if (change.operation !== "delete") return;
   // Using relationships.ts helpers for succinctness.
   await asyncMap(
     await getManyFrom(ctx.db, "messages", "owner", change.id),
@@ -1199,7 +1218,6 @@ forbid using the raw mutation wrappers which don't call your triggers.
 > If you edit data in the Convex dashboard, the triggers won't run.
 >
 > If you upload data through `npx convex import`, the triggers won't run.
-> const users = useQuery(api.users.getAll);
 
 ## CORS support for HttpRouter
 
@@ -1207,12 +1225,12 @@ Add CORS support to your Convex httpAction routes by registering a
 handler for OPTIONS preflight requests and returning the appropriate headers.
 Supports configuring allowed origins, allowed headers, exposed headers, allowing credentials, and browser cache max age, both for the entire router and per route overrides.
 
-Here's a snippet from our `http.ts` file demonstrating how to use the `corsHttpRouter`:
+Here's a snippet from our `http.ts` file demonstrating how to use `corsRouter`:
 
 ```typescript
 import { corsRouter } from "convex-helpers/server/cors";
 import { httpRouter } from "convex/server";
-import { httpAction } from "./_generated/api";
+import { httpAction } from "./_generated/server";
 
 // Your standard Convex http router:
 const http = httpRouter();
@@ -1225,7 +1243,7 @@ const cors = corsRouter(
     // allowedOrigins can also be a function
     // allowedOrigins: (req: Request) => Promise<string[]>
     allowedOrigins: ["http://localhost:8080"], // Default: ["*"]
-    allowedMethods: ["GET", "POST"], // Defaults to route spec method
+    // Allowed methods come from the routes registered below.
     allowedHeaders: ["Content-Type"], // Default: ["Content-Type"]
     exposedHeaders: ["Custom-Header"], // Default: ["Content-Range", "Accept-Ranges"]
     allowCredentials: true, // Default: false
