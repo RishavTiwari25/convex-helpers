@@ -34,25 +34,8 @@ There are two approaches to sessions data:
 
 ## Testing with a local backend
 
-[`convex/example.test.ts`](../convex/example.test.ts) demonstrates testing Convex functions by running them against a local backend.
-
-See [this Stack article](https://stack.convex.dev/testing-with-local-oss-backend) for more information.
-
-To set these up for yourself:
-
-- Either [download a pre-built binary(recommended)](https://github.com/convex/convex-backend/releases),
-  or [build it from source](https://stack.convex.dev/building-the-oss-backend).
-  `just run-local-backend` will attempt to download the binary automatically.
-- Create a `clearAll` function to reset data between tests (see [`convex/testingFunctions.ts`](../convex/testingFunctions.ts) for an example)
-- Start writing tests using [`ConvexTestingHelper.ts`](../packages/convex-helpers/testing.ts)
-- Make sure to call `clearAll` between tests and configure your testing framework to run one test at
-  a time to ensure test isolation
-- `npm run testFunctions` can be used to run these tests. This command does the following:
-  - Sets up a fresh local backend (see [backendHarness.js](../backendHarness.js))
-  - Sets the `IS_TEST` environment variable to enable calling test only functions
-  - Deploys code to the backend
-  - Runs the tests
-  - Tears down the backend
+See [backendHarness.js](../backendHarness.js) for instructions on testing Convex
+functions against a local backend, including setup and the command to run.
 
 ## Throttling client-side requests by Single-Flighting
 

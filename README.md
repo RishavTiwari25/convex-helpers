@@ -1138,14 +1138,17 @@ triggers.register("users", async (ctx, change) => {
   }
 });
 
-// 3. After the mutation, send the new user info to Clerk.
+// 3. After an insert or update, send the new user info to Clerk.
 // Even if a user is modified multiple times in a single mutation,
 // `internal.users.updateClerkUser` runs once.
 const scheduled: Record<Id<"users">, Id<"_scheduled_functions">> = {};
 triggers.register("users", async (ctx, change) => {
   if (scheduled[change.id]) {
     await ctx.scheduler.cancel(scheduled[change.id]);
+    delete scheduled[change.id];
   }
+  // Cancel any pending update on deletion; Clerk deletions need a separate handler.
+  if (change.operation === "delete") return;
   scheduled[change.id] = await ctx.scheduler.runAfter(
     0,
     internal.users.updateClerkUser,
@@ -1220,7 +1223,6 @@ forbid using the raw mutation wrappers which don't call your triggers.
 > If you edit data in the Convex dashboard, the triggers won't run.
 >
 > If you upload data through `npx convex import`, the triggers won't run.
-> const users = useQuery(api.users.getAll);
 
 ## CORS support for HttpRouter
 
@@ -1228,12 +1230,12 @@ Add CORS support to your Convex httpAction routes by registering a
 handler for OPTIONS preflight requests and returning the appropriate headers.
 Supports configuring allowed origins, allowed headers, exposed headers, allowing credentials, and browser cache max age, both for the entire router and per route overrides.
 
-Here's a snippet from our `http.ts` file demonstrating how to use the `corsHttpRouter`:
+Here's a snippet from our `http.ts` file demonstrating how to use `corsRouter`:
 
 ```typescript
 import { corsRouter } from "convex-helpers/server/cors";
 import { httpRouter } from "convex/server";
-import { httpAction } from "./_generated/api";
+import { httpAction } from "./_generated/server";
 
 // Your standard Convex http router:
 const http = httpRouter();
@@ -1246,7 +1248,7 @@ const cors = corsRouter(
     // allowedOrigins can also be a function
     // allowedOrigins: (req: Request) => Promise<string[]>
     allowedOrigins: ["http://localhost:8080"], // Default: ["*"]
-    allowedMethods: ["GET", "POST"], // Defaults to route spec method
+    // Allowed methods come from the routes registered below.
     allowedHeaders: ["Content-Type"], // Default: ["Content-Type"]
     exposedHeaders: ["Custom-Header"], // Default: ["Content-Range", "Accept-Ranges"]
     allowCredentials: true, // Default: false
